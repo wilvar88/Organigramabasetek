@@ -1,0 +1,26 @@
+{
+  "name": "organigrama-basetek",
+  "version": "2.1.0",
+  "description": "Visualizador interactivo de organigrama corporativo para Basetek S.A.S con soporte de vacantes, auto-zoom de grupos, menú administrador protegido, persistencia JSON automática y despliegue en Vercel",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wilvar88/Organigramabasetek.git"
+  },
+  "keywords": [
+    "organigrama",
+    "org-chart",
+    "d3",
+    "excel",
+    "sheetjs",
+    "basetek",
+    "basetek-sas",
+    "vercel"
+  ],
+  "author": "Wilson Varela - Basetek S.A.S",
+  "license": "MIT"
+}
