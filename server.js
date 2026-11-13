@@ -39,7 +39,7 @@ function ensureAdminsFile() {
 const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-GitHub-Token');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(200);
@@ -47,6 +47,23 @@ const server = http.createServer((req, res) => {
   }
 
   const reqPath = req.url.split('?')[0];
+
+  // Endpoint para leer organigrama desde /data/organigrama.json
+  if (req.method === 'GET' && reqPath === '/api/organigrama') {
+    try {
+      const orgPath = path.join(__dirname, 'data', 'organigrama.json');
+      if (fs.existsSync(orgPath)) {
+        const raw = fs.readFileSync(orgPath, 'utf-8');
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        return res.end(raw);
+      }
+      res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ success: false, error: 'organigrama.json no encontrado' }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ success: false, error: err.message }));
+    }
+  }
 
   // Endpoint para leer usuarios administradores desde /data/admins.json
   if (req.method === 'GET' && reqPath === '/api/admins') {

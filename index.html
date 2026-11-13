@@ -2187,6 +2187,18 @@
           <button type="submit" class="nm-btn nm-btn-primary">Guardar Administrador</button>
         </div>
       </form>
+
+      <div style="border-top: 1px solid rgba(34, 121, 177, 0.15); margin-top: 14px; padding-top: 14px;">
+        <div style="font-size: 0.82rem; font-weight: 800; color: #01326c; margin-bottom: 4px;">Sincronización Automática GitHub &amp; Vercel</div>
+        <p style="font-size: 0.74rem; color: var(--text-muted); margin-bottom: 10px; line-height: 1.4;">
+          Para que al subir un Excel se actualice automáticamente <code>data/organigrama.json</code> en GitHub y Vercel para todos los usuarios del mundo, configura un Token de GitHub (una sola vez) o agrega la variable <code>GITHUB_TOKEN</code> en Vercel.
+        </p>
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <input type="password" id="githubTokenInput" placeholder="ghp_... o github_pat_... (opcional si está en Vercel)" style="flex: 1; padding: 8px 11px; border-radius: 10px; border: 1.5px solid rgba(34, 121, 177, 0.25); font-size: 0.8rem; outline: none;">
+          <button type="button" class="nm-btn nm-btn-primary nm-btn-sm" id="btnSaveGithubToken">Guardar Token</button>
+        </div>
+        <div id="githubSyncStatusText" style="font-size: 0.72rem; color: #2279b1; margin-top: 6px; font-weight: 600;"></div>
+      </div>
     </div>
   </div>
 
@@ -2344,22 +2356,135 @@
 
     /**
      * ============================================================================
-     * MÓDULO 2: GESTIÓN DE PERSISTENCIA & AUTO-GUARDADO JSON (PUNTO 1)
+     * MÓDULO 2: SINCRONIZACIÓN GITHUB + PERSISTENCIA & AUTO-GUARDADO JSON
      * ============================================================================
-     * Cuando se sube un archivo Excel, automáticamente se guarda como .json dentro del
-     * proyecto mediante el endpoint /api/save-json o se auto-descarga sin reprocesos.
+     * Lee siempre el JSON compartido del repositorio (Vercel / GitHub) para que
+     * cualquier navegador del mundo vea la última versión, y al subir Excel guarda
+     * automáticamente en /data/organigrama.json tanto local como en GitHub/Vercel.
      */
+    const GitHubSyncService = {
+      OWNER: "wilvar88",
+      REPO: "Organigramabasetek",
+      BRANCH: "main",
+      TOKEN_KEY: "basetek_github_token_v1",
+
+      getToken() {
+        try {
+          return localStorage.getItem(this.TOKEN_KEY) || "";
+        } catch (e) {
+          return "";
+        }
+      },
+
+      setToken(token) {
+        try {
+          const clean = String(token || "").trim();
+          if (clean) {
+            localStorage.setItem(this.TOKEN_KEY, clean);
+          } else {
+            localStorage.removeItem(this.TOKEN_KEY);
+          }
+          this.updateTokenUI();
+        } catch (e) {}
+      },
+
+      updateTokenUI() {
+        const input = document.getElementById("githubTokenInput");
+        const status = document.getElementById("githubSyncStatusText");
+        const token = this.getToken();
+        if (input && token) input.value = token;
+        if (status) {
+          status.textContent = token
+            ? "Token guardado en este navegador: listo para sincronizar con GitHub y Vercel."
+            : "Sin token local (usará variable GITHUB_TOKEN del servidor/Vercel si está configurada).";
+        }
+      },
+
+      rawUrl(filePath) {
+        return `https://raw.githubusercontent.com/${this.OWNER}/${this.REPO}/${this.BRANCH}/${filePath}?t=${Date.now()}`;
+      },
+
+      apiContentsUrl(filePath) {
+        return `https://api.github.com/repos/${this.OWNER}/${this.REPO}/contents/${filePath}?ref=${this.BRANCH}`;
+      },
+
+      async fetchJsonFromRepo(filePath) {
+        const candidates = [
+          () => fetch(`./${filePath}?t=${Date.now()}`, { cache: "no-store" }),
+          () => fetch(this.apiContentsUrl(filePath) + `&t=${Date.now()}`, {
+            headers: { "Accept": "application/vnd.github.v3.raw" },
+            cache: "no-store"
+          }),
+          () => fetch(this.rawUrl(filePath), { cache: "no-store" })
+        ];
+
+        for (const tryFetch of candidates) {
+          try {
+            const res = await tryFetch();
+            if (res.ok) {
+              const data = await res.json();
+              if (Array.isArray(data) && data.length > 0) return data;
+            }
+          } catch (e) {}
+        }
+        return null;
+      },
+
+      async commitFile(filePath, contentStr, commitMessage) {
+        const token = this.getToken();
+        if (!token) return { ok: false, reason: "no-token" };
+
+        const apiUrl = `https://api.github.com/repos/${this.OWNER}/${this.REPO}/contents/${filePath}`;
+        const headers = {
+          "Authorization": `Bearer ${token}`,
+          "Accept": "application/vnd.github+json",
+          "Content-Type": "application/json"
+        };
+
+        let sha;
+        try {
+          const getRes = await fetch(`${apiUrl}?ref=${this.BRANCH}&t=${Date.now()}`, { headers, cache: "no-store" });
+          if (getRes.ok) {
+            const existing = await getRes.json();
+            sha = existing.sha;
+          }
+        } catch (e) {}
+
+        const bytes = new TextEncoder().encode(contentStr);
+        let binary = "";
+        bytes.forEach(b => { binary += String.fromCharCode(b); });
+        const base64Content = btoa(binary);
+
+        const body = { message: commitMessage, content: base64Content, branch: this.BRANCH };
+        if (sha) body.sha = sha;
+
+        const putRes = await fetch(apiUrl, {
+          method: "PUT",
+          headers,
+          body: JSON.stringify(body)
+        });
+
+        if (!putRes.ok) {
+          const errText = await putRes.text();
+          return { ok: false, reason: `GitHub ${putRes.status}: ${errText}` };
+        }
+        const json = await putRes.json();
+        return { ok: true, commitSha: json.commit?.sha || null };
+      }
+    };
+
     const StorageService = {
       STORAGE_KEY: "organigrama_saved_data_v2",
       STORAGE_META_KEY: "organigrama_saved_meta_v2",
 
-      save(data, sourceName = "Archivo importado") {
+      save(data, sourceName = "Archivo importado", isSynced = false) {
         try {
           localStorage.setItem(this.STORAGE_KEY, JSON.stringify(data));
           const meta = {
             sourceName,
             timestamp: new Date().toISOString(),
-            count: data.length
+            count: data.length,
+            isSynced
           };
           localStorage.setItem(this.STORAGE_META_KEY, JSON.stringify(meta));
           this.updateStatusBadge();
@@ -2368,36 +2493,54 @@
         }
       },
 
-      /**
-       * Auto-guarda en el proyecto (PUNTO 1):
-       * Intenta guardar en el servidor local/API /api/save-json.
-       * Si se corre directamente como archivo estático, genera y descarga organigrama.json
-       * automáticamente sin que el usuario tenga que hacer reprocesos.
-       */
       async autoSaveToProject(data) {
-        // 1. Intentar guardar en backend /api/save-json si está disponible
+        const headers = { "Content-Type": "application/json" };
+        const token = GitHubSyncService.getToken();
+        if (token) headers["X-GitHub-Token"] = token;
+
+        // 1. Intentar guardar vía /api/save-json (Vercel Serverless o server.js local)
         try {
           const res = await fetch('/api/save-json', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers,
             body: JSON.stringify(data)
           });
           if (res.ok) {
             const result = await res.json();
             if (result.success) {
-              showToast(`¡Excel guardado automáticamente en ${result.path}! (${data.length} personas)`);
+              this.save(data, result.syncedGitHub ? "GitHub & Vercel" : "Servidor Local", true);
+              showToast(
+                result.syncedGitHub
+                  ? `¡Actualizado en GitHub y Vercel para todos los navegadores! (${data.length} personas)`
+                  : `¡Excel guardado automáticamente en ${result.path}! (${data.length} personas)`
+              );
               return true;
             }
           }
-        } catch (err) {
-          // Servidor local no activo o entorno estático puro
+        } catch (err) {}
+
+        // 2. Intentar sincronizar directamente con GitHub desde el navegador si hay Token
+        if (token) {
+          try {
+            const jsonStr = JSON.stringify(data, null, 2);
+            const ghRes = await GitHubSyncService.commitFile(
+              "data/organigrama.json",
+              jsonStr,
+              `Actualización automática de organigrama (${data.length} colaboradores)`
+            );
+            if (ghRes.ok) {
+              this.save(data, "GitHub & Vercel", true);
+              showToast(`¡Sincronizado en GitHub y Vercel para todo el mundo! (${data.length} personas)`);
+              return true;
+            }
+          } catch (e) {}
         }
 
-        // 2. Si no hay backend local, auto-descarga directamente organigrama.json sin clics extras
+        // 3. Respaldo automático: descargar organigrama.json si no hay servidor ni token GitHub
         try {
           const jsonStr = JSON.stringify(data, null, 2);
           downloadFile(jsonStr, "organigrama.json", "application/json");
-          showToast(`¡Excel importado! Guardado en memoria y descargado automáticamente como organigrama.json`);
+          showToast(`Guardado local y descargado organigrama.json (Configura Token GitHub en Admin para auto-subir a Vercel)`);
         } catch (e) {
           showToast(`¡Excel importado y guardado en memoria! (${data.length} colaboradores)`);
         }
@@ -2420,18 +2563,17 @@
       },
 
       async loadPreloadedJSON() {
+        // Priorizar /api/organigrama (siempre lee lo último de GitHub/disco sin caché CDN),
+        // luego ./data/organigrama.json y finalmente GitHub API / Raw
         try {
-          const res = await fetch("./data/organigrama.json?t=" + Date.now());
-          if (res.ok) {
-            const data = await res.json();
-            if (Array.isArray(data) && data.length > 0) {
-              return data;
-            }
+          const apiRes = await fetch("/api/organigrama?t=" + Date.now(), { cache: "no-store" });
+          if (apiRes.ok) {
+            const data = await apiRes.json();
+            if (Array.isArray(data) && data.length > 0) return data;
           }
-        } catch (e) {
-          console.info("Archivo ./data/organigrama.json no disponible:", e);
-        }
-        return null;
+        } catch (e) {}
+
+        return await GitHubSyncService.fetchJsonFromRepo("data/organigrama.json");
       },
 
       clear() {
@@ -2458,7 +2600,7 @@
           const metaStr = localStorage.getItem(this.STORAGE_META_KEY);
           if (metaStr) {
             const meta = JSON.parse(metaStr);
-            badgeText.textContent = `Memoria activa (${meta.count} personas)`;
+            badgeText.textContent = `${meta.isSynced ? "Sincronizado" : "Memoria activa"} (${meta.count} personas)`;
             if (badgeDot) badgeDot.className = "metric-dot lime";
             return;
           }
@@ -2488,27 +2630,21 @@
       async init() {
         let loaded = null;
 
-        // 1. Intentar leer desde API del servidor local (/api/admins)
+        // 1. Intentar leer desde API (/api/admins en Vercel o server.js local)
         try {
-          const res = await fetch('/api/admins?t=' + Date.now());
+          const res = await fetch('/api/admins?t=' + Date.now(), { cache: "no-store" });
           if (res.ok) {
             const data = await res.json();
             if (Array.isArray(data) && data.length > 0) loaded = data;
           }
         } catch (e) {}
 
-        // 2. Intentar leer archivo estático ./data/admins.json
+        // 2. Intentar leer desde ./data/admins.json o GitHub
         if (!loaded) {
-          try {
-            const res = await fetch('./data/admins.json?t=' + Date.now());
-            if (res.ok) {
-              const data = await res.json();
-              if (Array.isArray(data) && data.length > 0) loaded = data;
-            }
-          } catch (e) {}
+          loaded = await GitHubSyncService.fetchJsonFromRepo("data/admins.json");
         }
 
-        // 3. Respaldo en localStorage si se está ejecutando en file://
+        // 3. Respaldo en localStorage si está offline o en file://
         if (!loaded) {
           try {
             const localStr = localStorage.getItem(this.STORAGE_KEY);
@@ -2541,22 +2677,42 @@
         this.ensurePrimaryAdmin();
         this.saveToLocalCache();
 
+        const headers = { 'Content-Type': 'application/json' };
+        const token = GitHubSyncService.getToken();
+        if (token) headers['X-GitHub-Token'] = token;
+
         try {
           const res = await fetch('/api/save-admins', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers,
             body: JSON.stringify(this.admins)
           });
           if (res.ok) {
             const result = await res.json();
             if (result.success) {
-              showToast(`Administradores guardados en ${result.path}`);
+              showToast(result.syncedGitHub
+                ? "Administradores guardados en GitHub y Vercel"
+                : `Administradores guardados en ${result.path}`);
               return true;
             }
           }
         } catch (e) {}
 
-        showToast("Administradores actualizados en memoria local (descarga admins.json para respaldo)");
+        if (token) {
+          try {
+            const ghRes = await GitHubSyncService.commitFile(
+              "data/admins.json",
+              JSON.stringify(this.admins, null, 2),
+              `Actualización de administradores (${this.admins.length} usuarios)`
+            );
+            if (ghRes.ok) {
+              showToast("Administradores sincronizados en GitHub y Vercel");
+              return true;
+            }
+          } catch (e) {}
+        }
+
+        showToast("Administradores actualizados en memoria local (descarga admins.json o configura Token GitHub)");
         return false;
       },
 
@@ -2677,20 +2833,37 @@
           return;
         }
 
-        // 2. Cargar logo.png del proyecto con fallback
-        if (logoImg) {
-          logoImg.onerror = function() {
-            if (!this._triedSvg) {
-              this._triedSvg = true;
-              this.src = "logo.svg";
-              if (slideLogo) slideLogo.src = "logo.svg";
-            } else {
-              this.style.display = "none";
-              if (logoFallback) logoFallback.style.display = "flex";
-              if (slideLogo) slideLogo.style.display = "none";
+        // 2. Cargar logo.png del proyecto con respaldo automático desde GitHub y SVG
+        const logoCandidates = [
+          "logo.png",
+          "https://raw.githubusercontent.com/wilvar88/Organigramabasetek/main/logo.png",
+          "logo.svg"
+        ];
+
+        const attachFallback = (imgEl, onExhausted) => {
+          if (!imgEl) return;
+          imgEl._logoStep = 0;
+          const tryNext = () => {
+            imgEl._logoStep += 1;
+            if (imgEl._logoStep < logoCandidates.length) {
+              imgEl.src = logoCandidates[imgEl._logoStep];
+            } else if (onExhausted) {
+              onExhausted(imgEl);
             }
           };
-        }
+          imgEl.onerror = tryNext;
+          if (imgEl.complete && imgEl.naturalWidth === 0) {
+            tryNext();
+          }
+        };
+
+        attachFallback(logoImg, (el) => {
+          el.style.display = "none";
+          if (logoFallback) logoFallback.style.display = "flex";
+        });
+        attachFallback(slideLogo, (el) => {
+          el.style.display = "none";
+        });
 
         // 3. Permitir cambiar logo haciendo clic (Solo Administrador)
         if (logoContainer && logoInput) {
@@ -3995,11 +4168,25 @@
         btnDownloadAdminsJSON.addEventListener("click", () => AdminAuthService.downloadAdminsJSON());
       }
 
-      // 2. Determinar origen de datos: LocalStorage -> JSON pregrabado -> Datos muestra
-      let initialEmployees = StorageService.load();
+      GitHubSyncService.updateTokenUI();
+      const btnSaveGithubToken = document.getElementById("btnSaveGithubToken");
+      const githubTokenInput = document.getElementById("githubTokenInput");
+      if (btnSaveGithubToken && githubTokenInput) {
+        btnSaveGithubToken.addEventListener("click", () => {
+          GitHubSyncService.setToken(githubTokenInput.value);
+          showToast(githubTokenInput.value.trim()
+            ? "Token de GitHub guardado para sincronización automática"
+            : "Token de GitHub eliminado");
+        });
+      }
 
-      if (!initialEmployees) {
-        initialEmployees = await StorageService.loadPreloadedJSON();
+      // 2. Determinar origen de datos: SIEMPRE priorizar JSON compartido (Vercel/GitHub) sobre caché local
+      let initialEmployees = await StorageService.loadPreloadedJSON();
+
+      if (initialEmployees) {
+        StorageService.save(initialEmployees, "Repositorio Basetek", true);
+      } else {
+        initialEmployees = StorageService.load();
       }
 
       if (!initialEmployees) {
